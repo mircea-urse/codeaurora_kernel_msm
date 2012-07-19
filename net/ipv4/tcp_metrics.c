@@ -28,12 +28,18 @@ enum tcp_metric_index {
 	TCP_METRIC_MAX,
 };
 
+struct tcp_fastopen_metrics {
+	u16	mss;
+	struct	tcp_fastopen_cookie	cookie;
+};
+
 struct tcp_metrics_block {
 	struct tcp_metrics_block __rcu	*tcpm_next;
 	struct inetpeer_addr		tcpm_addr;
 	unsigned long			tcpm_stamp;
 	u32				tcpm_lock;
 	u32				tcpm_vals[TCP_METRIC_MAX];
+	struct tcp_fastopen_metrics	tcpm_fastopen;
 };
 
 static bool tcp_metric_locked(struct tcp_metrics_block *tm,
@@ -112,6 +118,8 @@ static void tcpm_suck_dst(struct tcp_metrics_block *tm, struct dst_entry *dst)
 	tm->tcpm_vals[TCP_METRIC_SSTHRESH] = dst_metric_raw(dst, RTAX_SSTHRESH);
 	tm->tcpm_vals[TCP_METRIC_CWND] = dst_metric_raw(dst, RTAX_CWND);
 	tm->tcpm_vals[TCP_METRIC_REORDERING] = dst_metric_raw(dst, RTAX_REORDERING);
+	tm->tcpm_fastopen.mss = 0;
+	tm->tcpm_fastopen.cookie.len = 0;
 }
 
 static struct tcp_metrics_block *tcpm_new(struct dst_entry *dst,
@@ -491,6 +499,49 @@ reset:
 	else
 		tp->snd_cwnd = tcp_init_cwnd(tp, dst);
 	tp->snd_cwnd_stamp = tcp_time_stamp;
+}
+
+static DEFINE_SEQLOCK(fastopen_seqlock);
+
+void tcp_fastopen_cache_get(struct sock *sk, u16 *mss,
+			    struct tcp_fastopen_cookie *cookie)
+{
+	struct tcp_metrics_block *tm;
+
+	rcu_read_lock();
+	tm = tcp_get_metrics(sk, __sk_dst_get(sk), false);
+	if (tm) {
+		struct tcp_fastopen_metrics *tfom = &tm->tcpm_fastopen;
+		unsigned int seq;
+
+		do {
+			seq = read_seqbegin(&fastopen_seqlock);
+			if (tfom->mss)
+				*mss = tfom->mss;
+			*cookie = tfom->cookie;
+		} while (read_seqretry(&fastopen_seqlock, seq));
+	}
+	rcu_read_unlock();
+}
+
+
+void tcp_fastopen_cache_set(struct sock *sk, u16 mss,
+			    struct tcp_fastopen_cookie *cookie)
+{
+	struct tcp_metrics_block *tm;
+
+	rcu_read_lock();
+	tm = tcp_get_metrics(sk, __sk_dst_get(sk), true);
+	if (tm) {
+		struct tcp_fastopen_metrics *tfom = &tm->tcpm_fastopen;
+
+		write_seqlock_bh(&fastopen_seqlock);
+		tfom->mss = mss;
+		if (cookie->len > 0)
+			tfom->cookie = *cookie;
+		write_sequnlock_bh(&fastopen_seqlock);
+	}
+	rcu_read_unlock();
 }
 
 static unsigned long tcpmhash_entries;
