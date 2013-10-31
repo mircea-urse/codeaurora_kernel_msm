@@ -465,7 +465,7 @@ tcp_fastopen - INTEGER
 	5: Enables sending data in the opening SYN on the client regardless
 	   of cookie availability.
 
-	Default: 0
+	Default: 1
 
 tcp_syn_retries - INTEGER
 	Number of times initial SYNs for an active TCP connection attempt
